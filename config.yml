@@ -1,0 +1,7 @@
+tunnel: 28fca87a-e1ae-4de7-adbe-4fce955382b6
+credentials-file: C:\Users\Asus\.cloudflared\28fca87a-e1ae-4de7-adbe-4fce955382b6.json
+
+ingress:
+  - hostname: chat.my-gemini.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
