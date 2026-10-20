@@ -1,114 +1,69 @@
-# ═══════════════════════════════════════════════════════════════
-#  AI-Server Remote Agent Client (PowerShell)
-#  Full-featured remote client with all agent capabilities.
-#  Usage: irm <your-hosted-url> | iex
-# ═══════════════════════════════════════════════════════════════
+# AI-Server Remote Agent Client (PowerShell)
+# Usage: irm <your-hosted-url> | iex
 
-# ─── Resolve Server URL (auto-discover tunnel) ───
+# ─── Resolve Server URL ───
 function Get-ServerUrl {
-    # 1. Try local server first
     try {
         $r = Invoke-RestMethod -Uri "http://127.0.0.1:3000/chat" -Method Post `
             -Headers @{'Content-Type'='application/json'} `
             -Body (@{prompt="ping"}|ConvertTo-Json) -TimeoutSec 2 -ErrorAction Stop
         return "http://127.0.0.1:3000"
     } catch {}
-
-    # 2. Fetch from ntfy tunnel sync
     try {
         $raw = (Invoke-RestMethod -Uri "https://ntfy.sh/ghosty001_ai_tunnel_sync/raw?poll=1" -TimeoutSec 5)
         $lines = ($raw -split "`n") | Where-Object { $_.Trim() -match "^https?://" }
-        if ($lines.Count -gt 0) {
-            return ($lines[-1]).Trim()
-        }
+        if ($lines.Count -gt 0) { return ($lines[-1]).Trim() }
     } catch {}
-
-    Write-Host "`n  [!] Could not connect to AI server (local or tunnel)." -ForegroundColor Red
-    Write-Host "      Make sure the server is running: npm run dev`n" -ForegroundColor DarkGray
-    exit 1
+    Write-Host "could not connect to server."; exit 1
 }
 
-# ─── State ───
-$script:ServerUrl     = ""
-$script:AgentMode     = $true
-$script:History       = [System.Collections.ArrayList]::new()
-$script:LastCode      = $null   # last code_response object
-$script:LastWritten   = @()     # last written file paths
-$script:WorkDir       = (Get-Location).Path
-
-# ─── Colors & Printing ───
-function Write-C($text, $color="White") { Write-Host $text -ForegroundColor $color }
-function Write-Header($text) {
-    Write-Host ""
-    Write-Host "  ═══ $text ═══" -ForegroundColor Cyan
-}
-function Write-Line($text) { Write-Host "  $text" }
+$script:ServerUrl   = ""
+$script:AgentMode   = $true
+$script:History     = [System.Collections.ArrayList]::new()
+$script:LastCode    = $null
+$script:LastWritten = @()
+$script:WorkDir     = (Get-Location).Path
 
 # ─── Help ───
 function Show-Help {
-    Write-Header "AI Agent Commands"
     Write-Host ""
-    $cmds = @(
-        @{k="/write";       d="Write last AI code to file(s)";            a="[test]"}
-        @{k="/test";        d="Syntax-check a file (or last written)";    a="[file]"}
-        @{k="/run";         d="Run a file";                               a="<file>"}
-        @{k="/fix";         d="AI reads & fixes broken code";            a="<file> [instruction]"}
-        @{k="/files";       d="Show pending code files";                  a=""}
-        @{k="/history";     d="Show conversation history";                a=""}
-        @{k="/clear";       d="Clear conversation history";               a=""}
-        @{k="/mode";        d="Toggle agent/basic mode";                  a=""}
-        @{k="/help";        d="Show this help";                           a=""}
-        @{k="exit";         d="Quit";                                     a=""}
-    )
-    foreach ($c in $cmds) {
-        $key = $c.k.PadRight(14)
-        $args_text = if ($c.a) { " $($c.a)" } else { "" }
-        Write-Host "  " -NoNewline
-        Write-Host $key -NoNewline -ForegroundColor Cyan
-        Write-Host "$($c.d)$args_text"
-    }
-    Write-Host ""
-    $modeLabel = if ($script:AgentMode) { "agent (structured)" } else { "basic (plain)" }
-    Write-C "  Current mode: $modeLabel" DarkGray
+    Write-Host "commands:"
+    Write-Host "  /write         write last AI code to file(s) [test]"
+    Write-Host "  /test          syntax-check a file (or last written) [file]"
+    Write-Host "  /run           run a file <file>"
+    Write-Host "  /fix           AI reads & fixes broken code <file> [instruction]"
+    Write-Host "  /files         show pending code files"
+    Write-Host "  /history       show conversation history"
+    Write-Host "  /clear         clear conversation history"
+    Write-Host "  /mode          toggle agent/basic mode"
+    Write-Host "  /help          show this help"
+    Write-Host "  exit           quit"
+    $modeLabel = if ($script:AgentMode) { "agent" } else { "basic" }
+    Write-Host "  mode: $modeLabel"
     Write-Host ""
 }
 
-# ─── Code Block Printer ───
+# ─── Code Block ───
 function Show-CodeBlock($filepath, $code) {
     $ext = [System.IO.Path]::GetExtension($filepath) -replace '^\.',''
     if (-not $ext) { $ext = "txt" }
-    Write-C "  --- $filepath [$ext] ---" DarkYellow
+    Write-Host "--- $filepath [$ext] ---"
     $lines = $code -split "`n"
     $max = 25
     $show = $lines | Select-Object -First $max
     $i = 1
     foreach ($line in $show) {
         $num = $i.ToString().PadLeft(3)
-        Write-Host "    $num | $line"
+        Write-Host "  $num | $line"
         $i++
     }
-    if ($lines.Count -gt $max) {
-        Write-C "    ... ($($lines.Count - $max) more lines)" DarkGray
-    }
-    Write-C "  ---" DarkYellow
+    if ($lines.Count -gt $max) { Write-Host "  ... ($($lines.Count - $max) more lines)" }
+    Write-Host "---"
 }
 
-# ─── Parse AI Response (strip markdown fences) ───
-function Parse-AIResponse($rawText) {
-    $cleaned = $rawText.Trim()
-    if ($cleaned.StartsWith('```json')) { $cleaned = $cleaned.Substring(7) }
-    elseif ($cleaned.StartsWith('```'))  { $cleaned = $cleaned.Substring(3) }
-    if ($cleaned.EndsWith('```'))        { $cleaned = $cleaned.Substring(0, $cleaned.Length - 3) }
-    try {
-        return ($cleaned.Trim() | ConvertFrom-Json)
-    } catch {
-        return $null
-    }
-}
-
-# ─── Send Agent Query (/agent endpoint) ───
+# ─── Send Agent Query ───
 function Send-AgentQuery($prompt) {
-    Write-C "  thinking..." DarkGray
+    Write-Host "thinking..."
 
     $historyPayload = @()
     foreach ($msg in $script:History) {
@@ -124,11 +79,10 @@ function Send-AgentQuery($prompt) {
         $res = Invoke-RestMethod -Uri "$($script:ServerUrl)/agent" -Method Post `
             -Headers @{'Content-Type'='application/json'} -Body $body -TimeoutSec 120
     } catch {
-        Write-C "`n  [x] Connection error: $($_.Exception.Message)`n" Red
+        Write-Host "connection error: $($_.Exception.Message)"
         return
     }
 
-    # Add to history
     [void]$script:History.Add(@{ role = "user"; text = $prompt })
 
     if ($res.structured -and $res.data) {
@@ -137,19 +91,12 @@ function Send-AgentQuery($prompt) {
         if ($ai.type -eq "code_response" -and $ai.files) {
             $script:LastCode = $ai
 
-            if ($ai.explanation) {
-                Write-Host ""
-                Write-C "  AI: $($ai.explanation)" Green
-            }
+            if ($ai.explanation) { Write-Host "`nAI: $($ai.explanation)" }
 
-            Write-Host ""
-            Write-C "  $($ai.files.Count) file(s) ready to write:" Yellow
-            Write-Host ""
+            Write-Host "`n$($ai.files.Count) file(s) ready to write:`n"
 
             foreach ($f in $ai.files) {
-                if ($f.description) {
-                    Write-C "    > $($f.filepath) - $($f.description)" DarkCyan
-                }
+                if ($f.description) { Write-Host "  > $($f.filepath) - $($f.description)" }
                 Show-CodeBlock $f.filepath $f.code
                 Write-Host ""
             }
@@ -160,78 +107,66 @@ function Send-AgentQuery($prompt) {
                 text = "[Code: $fileList] $($ai.explanation)"
             })
 
-            Write-C '  Type "/write" to save, "/write test" to save & test.' Cyan
+            Write-Host 'type /write to save, /write test to save & test.'
             Write-Host ""
 
         } elseif ($ai.type -eq "chat_response") {
-            Write-Host ""
-            Write-Host "  AI: $($ai.message)" 
-            Write-Host ""
+            Write-Host "`nAI: $($ai.message)`n"
             [void]$script:History.Add(@{ role = "model"; text = $ai.message })
             $script:LastCode = $null
 
         } else {
             $text = if ($res.raw) { $res.raw } else { $ai | ConvertTo-Json -Depth 3 }
-            Write-Host ""
-            Write-Host "  AI: $text"
-            Write-Host ""
+            Write-Host "`nAI: $text`n"
             [void]$script:History.Add(@{ role = "model"; text = $text })
         }
 
     } elseif ($res.answer) {
-        Write-Host ""
-        Write-Host "  AI: $($res.answer)"
-        Write-Host ""
+        Write-Host "`nAI: $($res.answer)`n"
         [void]$script:History.Add(@{ role = "model"; text = $res.answer })
     } else {
-        Write-C "  [x] Unexpected response from server." Red
+        Write-Host "error: unexpected response from server."
     }
 
-    # Trim history if too long (keep last 20 exchanges)
-    while ($script:History.Count -gt 40) {
-        $script:History.RemoveAt(0)
-    }
+    while ($script:History.Count -gt 40) { $script:History.RemoveAt(0) }
 }
 
-# ─── Send Basic Query (/chat endpoint) ───
+# ─── Send Basic Query ───
 function Send-BasicQuery($prompt) {
-    Write-C "  thinking..." DarkGray
+    Write-Host "thinking..."
     $body = @{ prompt = $prompt } | ConvertTo-Json
     try {
         $res = Invoke-RestMethod -Uri "$($script:ServerUrl)/chat" -Method Post `
             -Headers @{'Content-Type'='application/json'} -Body $body -TimeoutSec 120
-        Write-Host ""
-        Write-Host "  AI: $($res.answer)"
-        Write-Host ""
+        Write-Host "`nAI: $($res.answer)`n"
     } catch {
-        Write-C "`n  [x] Connection error: $($_.Exception.Message)`n" Red
+        Write-Host "connection error: $($_.Exception.Message)"
     }
 }
 
-# ─── /write [test] ───
+# ─── /write ───
 function Write-Files($autoTest = $false) {
     if (-not $script:LastCode -or -not $script:LastCode.files -or $script:LastCode.files.Count -eq 0) {
-        Write-C "`n  No code files pending. Ask the AI to write some code first.`n" Yellow
+        Write-Host "`nno code files pending.`n"
         return
     }
 
     $files = $script:LastCode.files
-    Write-Host ""
-    Write-C "  Files to write:" Yellow
+    Write-Host "`nfiles to write:"
     $i = 1
     foreach ($f in $files) {
         $fullPath = Join-Path $script:WorkDir $f.filepath
         $status = if (Test-Path $fullPath) { "overwrite" } else { "create" }
-        Write-Host "    $i. $($f.filepath) [$status]"
+        Write-Host "  $i. $($f.filepath) [$status]"
         $i++
     }
     Write-Host ""
 
     $targetLabel = if ($files.Count -eq 1) { $files[0].filepath } else { "$($files.Count) file(s)" }
-    $answer = Read-Host "  Write to $($targetLabel)? (y/n) [y]"
+    $answer = Read-Host "write to $($targetLabel)? (y/n) [y]"
     $answer = $answer.Trim().ToLower()
     if ($answer -eq "n" -or $answer -eq "no") {
-        Write-C "  Cancelled.`n" DarkGray
+        Write-Host "cancelled.`n"
         return
     }
 
@@ -244,10 +179,10 @@ function Write-Files($autoTest = $false) {
                 New-Item -Path $dir -ItemType Directory -Force | Out-Null
             }
             Set-Content -Path $fullPath -Value $f.code -Encoding UTF8 -NoNewline
-            Write-C "    [ok] written: $($f.filepath)" Green
+            Write-Host "  [ok] written: $($f.filepath)"
             $writtenPaths += $f.filepath
         } catch {
-            Write-C "    [x] failed: $($f.filepath) - $($_.Exception.Message)" Red
+            Write-Host "  [x] failed: $($f.filepath) - $($_.Exception.Message)"
         }
     }
     Write-Host ""
@@ -255,18 +190,16 @@ function Write-Files($autoTest = $false) {
     $script:LastWritten = $writtenPaths
     $script:LastCode = $null
 
-    if ($autoTest -and $writtenPaths.Count -gt 0) {
-        Test-Files $writtenPaths
-    }
+    if ($autoTest -and $writtenPaths.Count -gt 0) { Test-Files $writtenPaths }
 }
 
-# ─── /test [file] ───
+# ─── /test ───
 function Test-Files($filePaths) {
-    Write-C "`n  Testing $($filePaths.Count) file(s)...`n" DarkGray
+    Write-Host "`ntesting $($filePaths.Count) file(s)...`n"
     foreach ($fp in $filePaths) {
         $fullPath = Join-Path $script:WorkDir $fp
         if (-not (Test-Path $fullPath)) {
-            Write-C "    [x] not found: $fp" Red
+            Write-Host "  [x] not found: $fp"
             continue
         }
         $ext = [System.IO.Path]::GetExtension($fp).ToLower()
@@ -280,29 +213,29 @@ function Test-Files($filePaths) {
             default { $null }
         }
         if (-not $cmd) {
-            Write-C "    [-] skip: $fp (no checker for $ext)" DarkGray
+            Write-Host "  [-] skip: $fp (no checker for $ext)"
             continue
         }
         try {
             $output = cmd /c $cmd 2>&1
             if ($LASTEXITCODE -eq 0) {
-                Write-C "    [ok] syntax ok: $fp" Green
+                Write-Host "  [ok] syntax ok: $fp"
             } else {
-                Write-C "    [x] syntax error: $fp" Red
-                $output | Select-Object -First 5 | ForEach-Object { Write-Host "         $_" }
+                Write-Host "  [x] syntax error: $fp"
+                $output | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
             }
         } catch {
-            Write-C "    [x] error: $fp - $($_.Exception.Message)" Red
+            Write-Host "  [x] error: $fp - $($_.Exception.Message)"
         }
     }
     Write-Host ""
 }
 
-# ─── /run <file> ───
+# ─── /run ───
 function Run-File($filepath) {
     $fullPath = Join-Path $script:WorkDir $filepath
     if (-not (Test-Path $fullPath)) {
-        Write-C "`n  File not found: $filepath`n" Red
+        Write-Host "`nfile not found: $filepath`n"
         return
     }
     $ext = [System.IO.Path]::GetExtension($filepath).ToLower()
@@ -317,24 +250,20 @@ function Run-File($filepath) {
         default { $null }
     }
     if (-not $cmd) {
-        Write-C "`n  No runner for $ext files.`n" Yellow
+        Write-Host "`nno runner for $ext files.`n"
         return
     }
-    Write-C "`n  Running $filepath..." DarkGray
-    Write-Host ""
+    Write-Host "`nrunning $filepath...`n"
     try {
         cmd /c $cmd 2>&1 | ForEach-Object { Write-Host "  $_" }
-        if ($LASTEXITCODE -eq 0) {
-            Write-C "`n  Exited OK.`n" Green
-        } else {
-            Write-C "`n  Exited with code $LASTEXITCODE.`n" Yellow
-        }
+        if ($LASTEXITCODE -eq 0) { Write-Host "`nexited ok.`n" }
+        else { Write-Host "`nexited with code $LASTEXITCODE.`n" }
     } catch {
-        Write-C "`n  Runtime error: $($_.Exception.Message)`n" Red
+        Write-Host "`nruntime error: $($_.Exception.Message)`n"
     }
 }
 
-# ─── /fix <file> [instruction] ───
+# ─── /fix ───
 function Fix-File($argStr) {
     $parts = $argStr -split '\s+', 2
     $filepath = $parts[0]
@@ -342,15 +271,14 @@ function Fix-File($argStr) {
 
     $fullPath = Join-Path $script:WorkDir $filepath
     if (-not (Test-Path $fullPath)) {
-        Write-C "`n  File not found: $filepath`n" Red
+        Write-Host "`nfile not found: $filepath`n"
         return
     }
 
     $code = Get-Content -Path $fullPath -Raw
     $lineCount = ($code -split "`n").Count
-    Write-C "`n  Reading $filepath ($lineCount lines)" DarkGray
-    Write-C "  Sending to AI for analysis..." DarkGray
-    Write-Host ""
+    Write-Host "`nreading $filepath ($lineCount lines)"
+    Write-Host "sending to AI for analysis...`n"
 
     $body = @{
         filepath    = $filepath
@@ -362,7 +290,7 @@ function Fix-File($argStr) {
         $res = Invoke-RestMethod -Uri "$($script:ServerUrl)/fix" -Method Post `
             -Headers @{'Content-Type'='application/json'} -Body $body -TimeoutSec 120
     } catch {
-        Write-C "  [x] Connection error: $($_.Exception.Message)`n" Red
+        Write-Host "connection error: $($_.Exception.Message)"
         return
     }
 
@@ -370,20 +298,16 @@ function Fix-File($argStr) {
         $fix = $res.data
 
         if ($fix.issues_found -and $fix.issues_found.Count -gt 0) {
-            Write-C "  $($fix.issues_found.Count) issue(s) found:" Yellow
-            Write-Host ""
+            Write-Host "$($fix.issues_found.Count) issue(s) found:`n"
             foreach ($issue in $fix.issues_found) {
                 $line = if ($issue.line) { $issue.line } else { "?" }
-                Write-C "    Line $($line): $($issue.problem)" Red
-                Write-C "      Fix: $($issue.fix)" Green
+                Write-Host "  line $($line): $($issue.problem)"
+                Write-Host "    fix: $($issue.fix)"
                 Write-Host ""
             }
         }
 
-        if ($fix.summary) {
-            Write-C "  Summary: $($fix.summary)" Cyan
-            Write-Host ""
-        }
+        if ($fix.summary) { Write-Host "summary: $($fix.summary)`n" }
 
         if ($fix.fixed_code) {
             Show-CodeBlock $filepath $fix.fixed_code
@@ -403,57 +327,46 @@ function Fix-File($argStr) {
         }
     } else {
         $msg = if ($res.data.message) { $res.data.message } elseif ($res.raw) { $res.raw } else { "No response" }
-        Write-Host "  AI: $msg`n"
+        Write-Host "AI: $msg`n"
     }
 }
 
 # ─── /files ───
 function Show-PendingFiles {
     if (-not $script:LastCode -or -not $script:LastCode.files) {
-        Write-C "`n  No code files pending.`n" Yellow
+        Write-Host "`nno code files pending.`n"
         return
     }
-    Write-C "`n  Pending files:" Yellow
+    Write-Host "`npending files:"
     $i = 1
     foreach ($f in $script:LastCode.files) {
         $desc = if ($f.description) { " - $($f.description)" } else { "" }
-        Write-Host "    $i. $($f.filepath)$desc"
+        Write-Host "  $i. $($f.filepath)$desc"
         $i++
     }
-    Write-C "`n  Type /write to save them.`n" Cyan
+    Write-Host "`ntype /write to save them.`n"
 }
 
 # ─── /history ───
 function Show-History {
     if ($script:History.Count -eq 0) {
-        Write-C "`n  No conversation history yet.`n" Yellow
+        Write-Host "`nno conversation history yet.`n"
         return
     }
-    Write-C "`n  Conversation history:" Cyan
+    Write-Host "`nconversation history:"
     $i = 1
     foreach ($msg in $script:History) {
         $who = if ($msg.role -eq "user") { "You" } else { "AI " }
         $preview = $msg.text
         if ($preview.Length -gt 80) { $preview = $preview.Substring(0, 80) + "..." }
-        Write-Host "    $i. $($who): $preview"
+        Write-Host "  $i. $($who): $preview"
         $i++
     }
     Write-Host ""
 }
 
-# ═══════════════════════════════════════════════════════════════
-#  MAIN: Connect & Start Interactive Loop
-# ═══════════════════════════════════════════════════════════════
-
+# ─── MAIN ───
 $script:ServerUrl = Get-ServerUrl
-
-Write-Host ""
-Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
-Write-Host "  |  AI Agent Ready (Remote Client)          |" -ForegroundColor Cyan
-Write-Host "  |  Type /help for available commands       |" -ForegroundColor Cyan
-Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
-Write-Host "  [connected: $($script:ServerUrl)]" -ForegroundColor DarkGray
-Write-Host ""
 
 while ($true) {
     $modeTag = if ($script:AgentMode) { "agent" } else { "basic" }
@@ -462,86 +375,60 @@ while ($true) {
 
     if (-not $trimmed) { continue }
 
-    # ─── exit ───
-    if ($trimmed -eq "exit") {
-        Write-C "`n  Goodbye.`n" Cyan
-        break
-    }
+    if ($trimmed -eq "exit") { break }
 
-    # ─── /help ───
     if ($trimmed -eq "/help") { Show-Help; continue }
 
-    # ─── /mode ───
     if ($trimmed -eq "/mode") {
         $script:AgentMode = -not $script:AgentMode
-        $label = if ($script:AgentMode) { "agent (structured)" } else { "basic (plain)" }
-        Write-C "`n  Switched to $label mode.`n" Green
+        $label = if ($script:AgentMode) { "agent" } else { "basic" }
+        Write-Host "switched to $label mode.`n"
         continue
     }
 
-    # ─── /clear ───
     if ($trimmed -eq "/clear") {
         $script:History.Clear()
         $script:LastCode = $null
         $script:LastWritten = @()
-        Write-C "`n  Conversation cleared.`n" Green
+        Write-Host "conversation cleared.`n"
         continue
     }
 
-    # ─── /history ───
     if ($trimmed -eq "/history") { Show-History; continue }
-
-    # ─── /files ───
     if ($trimmed -eq "/files") { Show-PendingFiles; continue }
 
-    # ─── /write [test] ───
     if ($trimmed -eq "/write" -or $trimmed -eq "/write test") {
         $autoTest = ($trimmed -eq "/write test")
         Write-Files $autoTest
         continue
     }
 
-    # ─── /test [file] ───
     if ($trimmed -match "^/test") {
         $arg = ($trimmed -replace "^/test\s*","").Trim()
-        if ($arg) {
-            Test-Files @($arg)
-        } elseif ($script:LastWritten.Count -gt 0) {
-            Test-Files $script:LastWritten
-        } else {
-            Write-C "`n  No files to test. Use: /test myfile.js`n" Yellow
-        }
+        if ($arg) { Test-Files @($arg) }
+        elseif ($script:LastWritten.Count -gt 0) { Test-Files $script:LastWritten }
+        else { Write-Host "`nno files to test. use: /test myfile.js`n" }
         continue
     }
 
-    # ─── /run <file> ───
     if ($trimmed -match "^/run") {
         $arg = ($trimmed -replace "^/run\s*","").Trim()
-        if ($arg) {
-            Run-File $arg
-        } else {
-            Write-C "`n  Usage: /run <filepath>`n" Yellow
-        }
+        if ($arg) { Run-File $arg }
+        else { Write-Host "`nusage: /run <filepath>`n" }
         continue
     }
 
-    # ─── /fix <file> [instruction] ───
     if ($trimmed -match "^/fix") {
         $arg = ($trimmed -replace "^/fix\s*","").Trim()
-        if ($arg) {
-            Fix-File $arg
-        } else {
-            Write-C "`n  Usage: /fix <file> [instruction]" Yellow
-            Write-C "    Example: /fix server.js" DarkGray
-            Write-C "    Example: /fix app.py add error handling`n" DarkGray
+        if ($arg) { Fix-File $arg }
+        else {
+            Write-Host "`nusage: /fix <file> [instruction]"
+            Write-Host "  example: /fix server.js"
+            Write-Host "  example: /fix app.py add error handling`n"
         }
         continue
     }
 
-    # ─── Normal prompt → send to AI ───
-    if ($script:AgentMode) {
-        Send-AgentQuery $trimmed
-    } else {
-        Send-BasicQuery $trimmed
-    }
+    if ($script:AgentMode) { Send-AgentQuery $trimmed }
+    else { Send-BasicQuery $trimmed }
 }
