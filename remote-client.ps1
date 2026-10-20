@@ -63,7 +63,6 @@ function Show-CodeBlock($filepath, $code) {
 
 # ─── Send Agent Query ───
 function Send-AgentQuery($prompt) {
-    Write-Host "thinking..."
 
     $historyPayload = @()
     foreach ($msg in $script:History) {
@@ -133,7 +132,6 @@ function Send-AgentQuery($prompt) {
 
 # ─── Send Basic Query ───
 function Send-BasicQuery($prompt) {
-    Write-Host "thinking..."
     $body = @{ prompt = $prompt } | ConvertTo-Json
     try {
         $res = Invoke-RestMethod -Uri "$($script:ServerUrl)/chat" -Method Post `
