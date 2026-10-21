@@ -386,8 +386,7 @@ function Show-History {
 
 # ─── MAIN ───
 $script:ServerUrl = Get-ServerUrl
-Write-Host "Connected to AI-Server at: $($script:ServerUrl)" -ForegroundColor Green
-Write-Host "Type /help for available commands or 'exit' to quit.`n"
+
 
 while ($true) {
     $modeTag = if ($script:AgentMode) { "agent" } else { "basic" }
