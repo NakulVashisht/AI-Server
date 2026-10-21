@@ -4,17 +4,38 @@
 # ─── Resolve Server URL ───
 function Get-ServerUrl {
     try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    # 1. Try local server health check
+    try {
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:3000/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+        if ($r.status -eq "ok") { return "http://127.0.0.1:3000" }
+    } catch {}
+
+    # 2. Try remote Cloudflare tunnel synced to ntfy
+    try {
+        $raw = [string](Invoke-RestMethod -Uri "https://ntfy.sh/ghosty001_ai_tunnel_sync/raw?poll=1" -TimeoutSec 8 -ErrorAction Stop)
+        $lines = @($raw -split "`r?`n" | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match "^https?://" })
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            $candidate = $lines[$i]
+            try {
+                $test = Invoke-RestMethod -Uri "$candidate/health" -Method Get -TimeoutSec 5 -ErrorAction Stop
+                if ($test.status -eq "ok") { return $candidate }
+            } catch {}
+        }
+    } catch {}
+
+    # 3. Fallback to basic /chat ping if /health not available
+    try {
         $r = Invoke-RestMethod -Uri "http://127.0.0.1:3000/chat" -Method Post `
             -Headers @{'Content-Type'='application/json'} `
-            -Body (@{prompt="ping"}|ConvertTo-Json) -TimeoutSec 2 -ErrorAction Stop
+            -Body (@{prompt="ping"}|ConvertTo-Json) -TimeoutSec 5 -ErrorAction Stop
         return "http://127.0.0.1:3000"
     } catch {}
-    try {
-        $raw = (Invoke-RestMethod -Uri "https://ntfy.sh/ghosty001_ai_tunnel_sync/raw?poll=1" -TimeoutSec 5)
-        $lines = ($raw -split "`n") | Where-Object { $_.Trim() -match "^https?://" }
-        if ($lines.Count -gt 0) { return ($lines[-1]).Trim() }
-    } catch {}
-    Write-Host "could not connect to server."; exit 1
+
+    Write-Host "could not connect to server. Ensure your server is running (npm run dev or npm run pm2)."
+    exit 1
 }
 
 $script:ServerUrl   = ""
@@ -365,6 +386,8 @@ function Show-History {
 
 # ─── MAIN ───
 $script:ServerUrl = Get-ServerUrl
+Write-Host "Connected to AI-Server at: $($script:ServerUrl)" -ForegroundColor Green
+Write-Host "Type /help for available commands or 'exit' to quit.`n"
 
 while ($true) {
     $modeTag = if ($script:AgentMode) { "agent" } else { "basic" }

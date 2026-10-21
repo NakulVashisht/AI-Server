@@ -99,6 +99,11 @@ function parseAIResponse(rawText) {
   return JSON.parse(cleaned.trim());
 }
 
+// ─── Health check endpoint (fast ping) ───
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
 // ─── Original /chat endpoint (backward compatible) ───
 app.post("/chat", async (req, res) => {
   try {
